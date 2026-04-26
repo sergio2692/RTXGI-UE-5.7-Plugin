@@ -968,121 +968,73 @@ const FGuid FDDGICustomVersion::GUID(0xc12f0537, 0x7346d9c5, 0x336fbba3, 0x738ab
 FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::SaveLoadProbeDataIsOptional, TEXT("DDGIVolCompVer"));
 
 // Create a CPU accessible GPU texture and copy the provided GPU texture's contents to it
-static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(FRHICommandListImmediate& RHICmdList, FRHITexture* textureGPU)
+static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(
+	FRHICommandListImmediate& RHICmdList, FRHITexture* textureGPU)
 {
 	FDDGITexturePixels ret;
-
-	// Early out if a GPU texture is not provided
 	if (!textureGPU) return ret;
 
 	const FIntVector textureSize = textureGPU->GetSizeXYZ();
 	if (textureSize.X <= 0 || textureSize.Y <= 0) return ret;
 
-	//ret.Desc.Width = textureGPU->GetTexture2D()->GetSizeX();
-	//ret.Desc.Height = textureGPU->GetTexture2D()->GetSizeY();
-	ret.Desc.Width = textureSize.X;
-	ret.Desc.Height = textureSize.Y;
+	ret.Desc.Width       = textureSize.X;
+	ret.Desc.Height      = textureSize.Y;
 	ret.Desc.PixelFormat = (int32)textureGPU->GetFormat();
 
-	// Create the texture
-	FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(TEXT("DDGIGetTexturePixelsSave"), ret.Desc.Width, ret.Desc.Height, textureGPU->GetFormat());
+	// Use UE5's proper readback API — handles all D3D12 alignment internally
+	FRHIGPUTextureReadback Readback(TEXT("DDGIGetTexturePixelsSave"));
+	Readback.EnqueueCopy(RHICmdList, textureGPU,
+		FResolveRect(0, 0, textureSize.X, textureSize.Y));
 
-//#if PLATFORM_PS5
-//	EPixelFormat SourceFormat = textureGPU->GetFormat();
-//	// PS5 might need format conversion
-//	if (SourceFormat == PF_A2B10G10R10)
-//	{
-//		// Convert to a format PS5 definitely supports
-//		SourceFormat = PF_FloatRGBA;
-//	}
-//
-//	FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(
-//		TEXT("DDGIGetTexturePixelsSave"), ret.Desc.Width, ret.Desc.Height, SourceFormat);
-//#else
-	//FRHITextureCreateDesc CreateInfo = FRHITextureCreateDesc::Create2D(
-		//TEXT("DDGIGetTexturePixelsSave"), ret.Desc.Width, ret.Desc.Height, textureGPU->GetFormat());
-//#endif
-
-	CreateInfo.AddFlags(TexCreate_ShaderResource
-
-#if defined(PLATFORM_PS5) && PLATFORM_PS5
-		| TexCreate_CPUReadback
-#endif
-	);
-
-	CreateInfo.InitialState = ERHIAccess::CopyDest;
-	ret.Texture = RHICreateTexture(CreateInfo);
-
-	// Use the actual allocated dest size (may differ from requested due to platform alignment)
-	const FIntVector destSize = ret.Texture->GetSizeXYZ();
-	// Clamp copy region to the minimum of source and dest to avoid out-of-bounds copies
-	const int32 copyWidth = FMath::Min(textureSize.X, destSize.X);
-	const int32 copyHeight = FMath::Min(textureSize.Y, destSize.Y);
-
-	// Update the descriptor to reflect what we can actually read back
-	ret.Desc.Width = copyWidth;
-	ret.Desc.Height = copyHeight;
-
-	// Transition the GPU texture to a copy source
-	RHICmdList.Transition(FRHITransitionInfo(textureGPU, ERHIAccess::SRVMask, ERHIAccess::CopySrc));
-
-	// Schedule a copy of the GPU texture to the CPU accessible GPU texture
-	//RHICmdList.CopyTexture(textureGPU, ret.Texture, FRHICopyTextureInfo{});
-
-	// Schedule a bounded copy of the GPU texture to the CPU accessible GPU texture
-	FRHICopyTextureInfo CopyInfo{};
-	CopyInfo.Size = FIntVector(copyWidth, copyHeight, 1);
-	RHICmdList.CopyTexture(textureGPU, ret.Texture, CopyInfo);
-
-	// Transition the GPU texture back to general
-	RHICmdList.Transition(FRHITransitionInfo(textureGPU, ERHIAccess::CopySrc, ERHIAccess::SRVMask));
+	// FlushRenderingCommands() is called by the caller between Step1 and Step2,
+	// so by the time Step2 runs the GPU work is already done.
+	// Store the readback on the ret so Step2 can finish it.
+	ret.Texture = nullptr; // no longer used
+	ret.PendingReadback = MakeShared<FRHIGPUTextureReadback>(MoveTemp(Readback));
 
 	return ret;
 }
 
 // Read the CPU accessible GPU texture data into CPU memory
-static void GetTexturePixelsStep2_RenderThread(FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& texturePixels)
+static void GetTexturePixelsStep2_RenderThread(
+	FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& texturePixels)
 {
-	if (!texturePixels.Texture)
+	if (!texturePixels.PendingReadback) return;
+
+	FRHIGPUTextureReadback* Readback = texturePixels.PendingReadback.Get();
+	if (!Readback->IsReady())
 	{
-		UE_LOG(LogTemp, Error, TEXT("DDGI GetTexturePixelsStep2 - NULL TEXTURE!"));
+		UE_LOG(LogTemp, Warning, TEXT("DDGI Step2 - readback not ready"));
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("DDGI GetTexturePixelsStep2 - Locking %dx%d texture"),
-		texturePixels.Desc.Width, texturePixels.Desc.Height);
-
-	// Get a pointer to the CPU memory
-	//uint8* mappedTextureMemory = (uint8*)RHICmdList.LockTexture2D(texturePixels.Texture, 0, RLM_ReadOnly, texturePixels.Desc.Stride, false);
-
-	//// Copy the texture data to CPU memory
-	//texturePixels.Pixels.AddZeroed(texturePixels.Desc.Height * texturePixels.Desc.Stride);
-	//FMemory::Memcpy(&texturePixels.Pixels[0], mappedTextureMemory, texturePixels.Desc.Height * texturePixels.Desc.Stride);
-
-	//RHICmdList.UnlockTexture2D(texturePixels.Texture, 0, false);
-
-	// Get a pointer to the CPU memory
-	uint32 Stride = 0;
-	uint8* mappedTextureMemory = (uint8*)RHICmdList.LockTexture2D(texturePixels.Texture, 0, RLM_ReadOnly, Stride, false);
-
-	if (!mappedTextureMemory)
+	int32 RowPitchInPixels = 0;
+	void* MappedData = Readback->Lock(RowPitchInPixels);
+	if (!MappedData)
 	{
-		UE_LOG(LogTemp, Error, TEXT("DDGI GetTexturePixelsStep2 - FAILED TO LOCK TEXTURE!"));
+		UE_LOG(LogTemp, Error, TEXT("DDGI Step2 - Lock failed"));
 		return;
 	}
 
-	texturePixels.Desc.Stride = Stride;
+	const int32 BytesPerPixel = GPixelFormats[texturePixels.Desc.PixelFormat].BlockBytes;
+	const int32 SrcRowBytes   = RowPitchInPixels * BytesPerPixel;
+	const int32 DstRowBytes   = texturePixels.Desc.Width * BytesPerPixel;
 
-	UE_LOG(LogTemp, Warning, TEXT("DDGI GetTexturePixelsStep2 - Stride:%d, Copying %d bytes"),
-		Stride, texturePixels.Desc.Height * Stride);
+	texturePixels.Desc.Stride = DstRowBytes;
+	texturePixels.Pixels.AddZeroed(texturePixels.Desc.Height * DstRowBytes);
 
-	// Copy the texture data to CPU memory
-	texturePixels.Pixels.AddZeroed(texturePixels.Desc.Height * texturePixels.Desc.Stride);
-	FMemory::Memcpy(&texturePixels.Pixels[0], mappedTextureMemory, texturePixels.Desc.Height * texturePixels.Desc.Stride);
+	// Copy row by row to strip GPU pitch padding
+	for (int32 Row = 0; Row < (int32)texturePixels.Desc.Height; Row++)
+	{
+		FMemory::Memcpy(
+			texturePixels.Pixels.GetData() + Row * DstRowBytes,
+			(const uint8*)MappedData        + Row * SrcRowBytes,
+			DstRowBytes
+		);
+	}
 
-	RHICmdList.UnlockTexture2D(texturePixels.Texture, 0, false);
-
-	UE_LOG(LogTemp, Warning, TEXT("DDGI GetTexturePixelsStep2 - SUCCESS! Copied %d pixels"), texturePixels.Pixels.Num());
+	Readback->Unlock();
+	texturePixels.PendingReadback.Reset();
 }
 
 static void SaveFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixels, bool bSaveFormat)
