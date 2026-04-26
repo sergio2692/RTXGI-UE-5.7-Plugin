@@ -43,41 +43,12 @@ ADDGIVolume::ADDGIVolume(const FObjectInitializer& ObjectInitializer)
 void ADDGIVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	//if (DDGIVolumeComponent->RuntimeStatic)
-	//{
-		/*auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
-		if (CVarDDGIStaticInEditor && CVarDDGIStaticInEditor->GetBool())
-		{
-			return;
-		}*/
-	//	return;
-	//}
-	//else
-	//{
-		/*
-		if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UDDGIVolumeComponent, ProbeCounts))
-		{
-			DDGIVolumeComponent->ClearProbeData();
-		}*/
-		DDGIVolumeComponent->MarkRenderDynamicDataDirty();
-	//}
+	DDGIVolumeComponent->MarkRenderDynamicDataDirty();
 }
 
 void ADDGIVolume::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-	//if (DDGIVolumeComponent->RuntimeStatic)
-	//{
-		/*auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI."));
-		if (CVarDDGIStaticInEditor && CVarDDGIStaticInEditor->GetBool())
-		{
-			return;
-		}*/
-	//	return;
-	//}
-	//else
-	//{
 	DDGIVolumeComponent->MarkRenderDynamicDataDirty();
-	 //}
 }
 #endif

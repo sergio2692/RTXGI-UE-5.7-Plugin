@@ -172,16 +172,22 @@ public:
 		// Create vertex buffer. Fill buffer with initial data upon creation
 #if ENGINE_MAJOR_VERSION < 5
 		FRHIResourceCreateInfo CreateInfo(&Verts);
-#else
-		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereVertexBuffer"), &Verts);
-#endif
 		VertexBufferRHI = RHICmdList.CreateVertexBuffer(Size, BUF_Static, CreateInfo);
+#else
+		const FRHIBufferCreateDesc CreateDesc
+		= FRHIBufferCreateDesc::CreateVertex(TEXT("TDDGIProbeSphereVertexBuffer"), Size)
+		.AddUsage(EBufferUsageFlags::Static)
+		.SetInitActionResourceArray(&Verts)
+		.DetermineInitialState();
+		
+		VertexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+#endif
 	}
 
 	int32 GetVertexCount() const { return NumSphereVerts; }
 
 private:
-	int32 NumSphereVerts;
+	int32 NumSphereVerts{};
 };
 
 /**
@@ -224,16 +230,23 @@ public:
 		// Create index buffer. Fill buffer with initial data upon creation
 #if ENGINE_MAJOR_VERSION < 5
 		FRHIResourceCreateInfo CreateInfo(&Indices);
-#else
-		FRHIResourceCreateInfo CreateInfo(TEXT("TDDGIProbeSphereIndexBuffer"), &Indices);
-#endif
 		IndexBufferRHI = RHICmdList.CreateIndexBuffer(Stride, Size, BUF_Static, CreateInfo);
+#else
+		const FRHIBufferCreateDesc CreateDesc
+		= FRHIBufferCreateDesc::CreateIndex(TEXT("TDDGIProbeSphereIndexBuffer"), Size, Stride)
+		.AddUsage(EBufferUsageFlags::Static)
+		.SetInitActionResourceArray(&Indices)
+		.DetermineInitialState();
+		
+		IndexBufferRHI = RHICmdList.CreateBuffer(CreateDesc);
+#endif
+		
 	}
 
 	int32 GetIndexCount() const { return NumIndices; };
 
 private:
-	int32 NumIndices;
+	int32 NumIndices{};
 };
 
 struct FVisualDDGIProbesVertex
