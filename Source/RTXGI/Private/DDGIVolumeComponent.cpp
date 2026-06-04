@@ -1005,7 +1005,7 @@ static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(FRHICommandListImme
 
 	CreateInfo.AddFlags(TexCreate_ShaderResource
 
-#if PLATFORM_PS5
+#if defined(PLATFORM_PS5) && PLATFORM_PS5
 		| TexCreate_CPUReadback
 #endif
 	);
