@@ -83,19 +83,12 @@ static TAutoConsoleVariable<float> CVarDDGIIrradianceScalar(
 	ECVF_RenderThreadSafe);
 #endif
 
-#if WITH_EDITOR
-static TAutoConsoleVariable<bool> CVarDDGIStaticInEditor(
-	TEXT("r.RTXGI.DDGI.StaticInEditor"),
-	true,
-	TEXT("If true, will not update DDGI volumes in editor views\n"),
-	ECVF_RenderThreadSafe);
-#endif
-
-static TAutoConsoleVariable<bool> CVarDDGIForceRealtime(
-	TEXT("r.RTXGI.DDGI.ForceRealtime"),
+static TAutoConsoleVariable<bool> CVarDDGIStatic(
+	TEXT("r.RTXGI.DDGI.EnableStatic"),
 	false,
-	TEXT("If true, will force DDGI volumes as realtime.\n"),
+	TEXT("If true all DDGI volumes are running static"),
 	ECVF_RenderThreadSafe);
+
 #if !RHI_RAYTRACING
 #error "RTXGI requires RHI_RAYTRACING to be enabled"
 #endif
@@ -884,12 +877,7 @@ void DebugShaderPlatformsDetailed()
 		AnyRayTracingPassEnabledHandle = ARTPEDelegate.AddStatic(
 			[](bool& anyEnabled)
 			{
-				const bool bCanEverRun = CVarDDGIForceRealtime.GetValueOnRenderThread()
-#if WITH_EDITOR
-				|| !CVarDDGIStaticInEditor.GetValueOnRenderThread()
-#endif
-				;
-				anyEnabled |= bCanEverRun;
+				anyEnabled |= true;
 			}
 		);
 #endif // RHI_RAYTRACING
@@ -934,16 +922,13 @@ void DebugShaderPlatformsDetailed()
 		float totalPriority = 0.0f;
 		for (FDDGIVolumeSceneProxy* proxy : FDDGIVolumeSceneProxy::AllProxiesReadyForRender_RenderThread)
 		{
+			if (CVarDDGIStatic.GetValueOnRenderThread()) break;
+			
 			// Don't update the volume if it isn't part of the current scene
 			if (proxy->OwningScene != &Scene) continue;
 
 			// Don't update static runtime volumes during gameplay
-			const bool bIsValidForStatic = (View.bIsGameView && !CVarDDGIForceRealtime.GetValueOnRenderThread())
-#if WITH_EDITOR
-				|| CVarDDGIStaticInEditor.GetValueOnRenderThread()
-#endif
-				;
-			if (bIsValidForStatic && proxy->ComponentData.RuntimeStatic) continue;
+			if (View.bIsGameView && proxy->ComponentData.RuntimeStatic) continue;
 
 			// Don't update the volume if it is disabled
 			if (!proxy->ComponentData.EnableVolume) continue;
@@ -1814,6 +1799,9 @@ void DebugShaderPlatformsDetailed()
 } // namespace DDGIVolumeUpdate
 
 #undef LOCTEXT_NAMESPACE
+
+#if !IS_MONOLITHIC
+
 bool FViewInfo::HasRayTracingScene() const
 {
 	check(Family);
@@ -1877,4 +1865,4 @@ FRHIRayTracingShader* GetRayTracingDefaultOpaqueShader(const FGlobalShaderMap* S
 {
 	return ShaderMap->GetShader<FOpaqueShadowHitGroup>().GetRayTracingShader();
 }
-
+#endif
