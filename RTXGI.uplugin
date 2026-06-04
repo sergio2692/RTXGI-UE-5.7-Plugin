@@ -31,5 +31,11 @@
 				"Win64"
 			]
 		}
+	],
+	"Plugins": [
+		{
+			"Name": "RenderTrace",
+			"Enabled": true
+		}
 	]
 }

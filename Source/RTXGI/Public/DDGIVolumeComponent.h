@@ -7,7 +7,6 @@
 * distribution of this software and related documentation without an express
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
-
 #pragma once
 
 // UE4 public interfaces
@@ -17,6 +16,7 @@
 #include "Components/SceneComponent.h"
 #include "RHI.h"
 #include "RHIResources.h"
+#include "RHIGPUReadback.h"
 #include "RendererInterface.h"
 #include "Runtime/Launch/Resources/Version.h"
 
@@ -73,6 +73,7 @@ struct FDDGITexturePixels
 		uint32 Stride = 0;
 		uint32 PixelFormat = 0;
 	} Desc;
+	TSharedPtr<FRHIGPUTextureReadback> PendingReadback;
 	TArray<uint8> Pixels;
 	TRefCountPtr<FRHITexture> Texture;
 };
