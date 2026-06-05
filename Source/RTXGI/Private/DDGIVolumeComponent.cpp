@@ -968,6 +968,14 @@ const FGuid FDDGICustomVersion::GUID(0xc12f0537, 0x7346d9c5, 0x336fbba3, 0x738ab
 FCustomVersionRegistration GRegisterCustomVersion(FDDGICustomVersion::GUID, FDDGICustomVersion::SaveLoadProbeDataIsOptional, TEXT("DDGIVolCompVer"));
 
 // Create a CPU accessible GPU texture and copy the provided GPU texture's contents to it
+static bool HasRequiredTexturePixels(const FDDGITexturePixels& TexturePixels)
+{
+	return TexturePixels.Desc.Width > 0
+		&& TexturePixels.Desc.Height > 0
+		&& TexturePixels.Desc.Stride > 0
+		&& TexturePixels.Pixels.Num() == int32(TexturePixels.Desc.Height * TexturePixels.Desc.Stride);
+}
+
 static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(
 	FRHICommandListImmediate& RHICmdList, FRHITexture* textureGPU)
 {
@@ -996,24 +1004,53 @@ static FDDGITexturePixels GetTexturePixelsStep1_RenderThread(
 }
 
 // Read the CPU accessible GPU texture data into CPU memory
-static void GetTexturePixelsStep2_RenderThread(
-	FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& texturePixels)
+static bool WaitForDDGITextureReadback_RenderThread(
+	FRHICommandListImmediate& RHICmdList,
+	FRHIGPUTextureReadback& Readback,
+	const TCHAR* DebugName)
 {
-	if (!texturePixels.PendingReadback) return;
+	check(IsInRenderingThread() || IsInParallelRenderingThread());
+
+	constexpr double MaxWaitSeconds = 2.0;
+	const double StartTime = FPlatformTime::Seconds();
+
+	while (!Readback.IsReady())
+	{
+		RHICmdList.SubmitCommandsHint();
+		if (IsRunningRHIInSeparateThread())
+		{
+			RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
+		}
+
+		if ((FPlatformTime::Seconds() - StartTime) >= MaxWaitSeconds)
+		{
+			UE_LOG(LogTemp, Error, TEXT("DDGI %s readback timed out after %.2f seconds"), DebugName, MaxWaitSeconds);
+			return false;
+		}
+
+		FPlatformProcess::Sleep(0.001f);
+	}
+
+	return true;
+}
+
+static bool GetTexturePixelsStep2_RenderThread(
+	FRHICommandListImmediate& RHICmdList, FDDGITexturePixels& texturePixels, const TCHAR* DebugName)
+{
+	if (!texturePixels.PendingReadback) return false;
 
 	FRHIGPUTextureReadback* Readback = texturePixels.PendingReadback.Get();
-	if (!Readback->IsReady())
+	if (!WaitForDDGITextureReadback_RenderThread(RHICmdList, *Readback, DebugName))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("DDGI Step2 - readback not ready"));
-		return;
+		return false;
 	}
 
 	int32 RowPitchInPixels = 0;
 	void* MappedData = Readback->Lock(RowPitchInPixels);
 	if (!MappedData)
 	{
-		UE_LOG(LogTemp, Error, TEXT("DDGI Step2 - Lock failed"));
-		return;
+		UE_LOG(LogTemp, Error, TEXT("DDGI %s readback lock failed"), DebugName);
+		return false;
 	}
 
 	const int32 BytesPerPixel = GPixelFormats[texturePixels.Desc.PixelFormat].BlockBytes;
@@ -1021,6 +1058,7 @@ static void GetTexturePixelsStep2_RenderThread(
 	const int32 DstRowBytes   = texturePixels.Desc.Width * BytesPerPixel;
 
 	texturePixels.Desc.Stride = DstRowBytes;
+	texturePixels.Pixels.Reset();
 	texturePixels.Pixels.AddZeroed(texturePixels.Desc.Height * DstRowBytes);
 
 	// Copy row by row to strip GPU pitch padding
@@ -1035,6 +1073,7 @@ static void GetTexturePixelsStep2_RenderThread(
 
 	Readback->Unlock();
 	texturePixels.PendingReadback.Reset();
+	return HasRequiredTexturePixels(texturePixels);
 }
 
 static void SaveFDDGITexturePixels(FArchive& Ar, FDDGITexturePixels& texturePixels, bool bSaveFormat)
@@ -1144,13 +1183,10 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 			// Probe data can be optionally not saved depending on project settings.
 			bool bSeralizeProbesIsOptional = Ar.CustomVer(FDDGICustomVersion::GUID) >= FDDGICustomVersion::SaveLoadProbeDataIsOptional;
 			bool bProbesSerialized = bSeralizeProbesIsOptional ? GetDefault<URTXGIPluginSettings>()->SerializeProbes : true;
-			if (bSeralizeProbesIsOptional)
-				Ar << bProbesSerialized;
+			FDDGITexturePixels Irradiance, Distance, Offsets, States;
 
 			if (bProbesSerialized)
 			{
-				FDDGITexturePixels Irradiance, Distance, Offsets, States;
-
 				//auto CVarDDGIStaticInEditor = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RTXGI.DDGI.StaticInEditor"));
 
 				// When we are *not* cooking and ray tracing is available, copy the DDGIVolume probe texture resources
@@ -1179,16 +1215,24 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 					FlushRenderingCommands();
 
 					// Read the GPU texture data to CPU memory
+					bool bReadbackSucceeded = false;
 					ENQUEUE_RENDER_COMMAND(DDGISaveTexStep2)(
-						[&Irradiance, &Distance, &Offsets, &States](FRHICommandListImmediate& RHICmdList)
+						[&Irradiance, &Distance, &Offsets, &States, &bReadbackSucceeded](FRHICommandListImmediate& RHICmdList)
 						{
-							GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance);
-							GetTexturePixelsStep2_RenderThread(RHICmdList, Distance);
-							GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets);
-							GetTexturePixelsStep2_RenderThread(RHICmdList, States);
+							const bool bIrradianceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Irradiance, TEXT("Irradiance"));
+							const bool bDistanceReady = GetTexturePixelsStep2_RenderThread(RHICmdList, Distance, TEXT("Distance"));
+							GetTexturePixelsStep2_RenderThread(RHICmdList, Offsets, TEXT("Offsets"));
+							GetTexturePixelsStep2_RenderThread(RHICmdList, States, TEXT("States"));
+							bReadbackSucceeded = bIrradianceReady && bDistanceReady;
 						}
 					);
 					FlushRenderingCommands();
+
+					if (!bReadbackSucceeded)
+					{
+						UE_LOG(LogTemp, Error, TEXT("DDGI probe serialization skipped because required readback data was not available"));
+						bProbesSerialized = false;
+					}
 				}
 				else
 				{
@@ -1196,9 +1240,15 @@ void UDDGIVolumeComponent::Serialize(FArchive& Ar)
 					Distance = LoadContext.Distance;
 					Offsets = LoadContext.Offsets;
 					States = LoadContext.States;
+					bProbesSerialized = HasRequiredTexturePixels(Irradiance) && HasRequiredTexturePixels(Distance);
 				}
+			}
 
-				// Write the volume data
+			if (bSeralizeProbesIsOptional)
+				Ar << bProbesSerialized;
+
+			if (bProbesSerialized)
+			{
 				SaveFDDGITexturePixels(Ar, Irradiance, bSaveFormat);
 				SaveFDDGITexturePixels(Ar, Distance, bSaveFormat);
 				SaveFDDGITexturePixels(Ar, Offsets, bSaveFormat);
